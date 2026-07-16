@@ -110,7 +110,30 @@ QUEUE_MAXSIZE = 200
 # Fragment-mode (fallback) settings.
 FRAGMENT_MS = 250
 FRAGMENT_DIR = "/home/nao/recordings/_stream"
-FRAGMENT_CHANNELS_MASK = (0, 0, 1, 0)   # front mic mono
+# Which of NAO's four mics to record. Measured on the robot with all four
+# recorded simultaneously during 12s of speech:
+#
+#   LEFT   RMS=1045  PEAK=6135  -> "one two three, one two three, ..."
+#   RIGHT  RMS=969   PEAK=5952  -> "One, two, three, ..."
+#   FRONT  RMS=730   PEAK=4483  -> "一、二、三,一、二、三..."   <- Chinese!
+#   REAR   RMS=705   PEAK=4880  -> "One two three, ..."
+#
+# FRONT was the weakest of the four and the only one we recorded. Whisper
+# rendered that channel's English as Chinese characters — what a marginal
+# signal does to STT. LEFT is ~43% hotter and transcribes cleanly, so it is
+# the default. Override with MIC_CHANNEL=left|right|front|rear|all to
+# A/B another mic on the robot without a redeploy.
+_MIC_MASKS = {
+    "left":  (1, 0, 0, 0),
+    "right": (0, 1, 0, 0),
+    "front": (0, 0, 1, 0),
+    "rear":  (0, 0, 0, 1),
+    "all":   (1, 1, 1, 1),
+}
+_MIC_CHANNEL = os.environ.get("MIC_CHANNEL", "left").strip().lower()
+# An unknown value must not silently record a dead channel — fall back to
+# the measured-best mic rather than whatever a typo maps to.
+FRAGMENT_CHANNELS_MASK = _MIC_MASKS.get(_MIC_CHANNEL, _MIC_MASKS["left"])
 FRAGMENT_HEADER_WAIT_S = 1.20
 FRAGMENT_STALL_RESTART_S = 2.0
 FRAGMENT_ZERO_PCM_RESTART_S = 6.0

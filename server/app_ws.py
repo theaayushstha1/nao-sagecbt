@@ -44,7 +44,7 @@ from fastapi import (
     status,
 )
 
-from server import breathing_pacing, config, motion_trigger, openai_tts, safety
+from server import breathing_pacing, config, memory, motion_trigger, openai_tts, safety
 from server import _legacy_helpers as legacy
 from server.tools import emotion as _emotion_module
 
@@ -918,7 +918,7 @@ class _Session:
 
     __slots__ = (
         "username", "session_id", "face_id", "hint",
-        "asking_name",
+        "asking_name", "onboarding_retries",
         "audio_buf", "image_b64", "turn_idx",
         "out_seq",
         # Phase 2 additions ─ EoU arbiter + post-TTS cooldown
@@ -950,6 +950,7 @@ class _Session:
         self.face_id: str | None = None
         self.hint: str | None = None
         self.asking_name: bool = False
+        self.onboarding_retries: int = 0
         self.audio_buf = bytearray()
         self.image_b64: str | None = None
         self.turn_idx = 0
@@ -1278,6 +1279,27 @@ async def _emit_motion(ws: WebSocket, sess: _Session, transcript: str,
                 user=sess.username, error=repr(exc),
             )
     else:
+        # `learn_face` teaches the NAOqi face database on the robot — that is
+        # what lets NAO's eyes recognise this person later. But recognition
+        # only pays off if the server can map that name back to a profile,
+        # and `memory.upsert_user` (the only writer of `users`) was never
+        # called from the live path. Result: faces got learned on the robot
+        # while the users table never heard of them, so every session looked
+        # like a brand-new user. Persist BEFORE the action so a robot-side
+        # failure can't leave the two stores disagreeing.
+        if motion.action == "learn_face":
+            learned = ((motion.args or {}).get("name") or "").strip()
+            if learned:
+                try:
+                    await asyncio.to_thread(memory.ensure_user, learned, learned)
+                    sess.username = learned.strip().lower()
+                    sess.asking_name = False
+                    sess.onboarding_retries = 0
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "learn_face_upsert_failed",
+                        user=sess.username, name=learned, error=repr(exc),
+                    )
         # Action FIRST so the robot can begin the gesture as the ack starts.
         # The voice-profile branch above doesn't have a robot-side action;
         # it's a server-state flip.
@@ -1307,6 +1329,25 @@ async def _emit_motion(ws: WebSocket, sess: _Session, transcript: str,
 _ONBOARDING_NAME_PROMPT = "Hi, I'm NAO. What should I call you?"
 _ONBOARDING_NAME_RETRY = "Sorry, what name should I call you?"
 
+# Give up asking after this many rejected answers and carry on as `guest`.
+# Without a bound, a user whose answer never parses as a name is asked
+# forever — and if the robot hears its own prompt, it asks *itself* forever.
+_ONBOARDING_NAME_MAX_RETRIES = 3
+
+# Echo markers, as patterns rather than literals. The retry prompt says
+# "what NAME should I call you"; a plain "what should i call you" literal
+# missed it by one interposed word, so NAO's own retry sailed through the
+# guard as if a user had said it — the ask/echo/ask loop. `test_onboarding_
+# echo_guard_covers_every_prompt_constant` pins every prompt constant here
+# so the two can never drift apart again.
+_ONBOARDING_ECHO_PATTERNS = (
+    re.compile(r"what\s+(?:name\s+)?should\s+i\s+call\s+you"),
+    re.compile(r"\bi(?:'m| am)\s+nao\b"),
+    re.compile(r"my camera is on for this conversation"),
+    re.compile(r"say stop watching me"),
+    re.compile(r"heads up"),
+)
+
 
 def _is_onboarding_prompt_echo(transcript: str) -> bool:
     """True when STT heard NAO's own onboarding/camera prompt.
@@ -1321,17 +1362,7 @@ def _is_onboarding_prompt_echo(transcript: str) -> bool:
     t = re.sub(r"\s+", " ", transcript or "").strip().lower()
     if not t:
         return False
-    markers = (
-        "what should i call you",
-        "hi i'm nao",
-        "hi i am nao",
-        "i'm nao",
-        "i am nao",
-        "my camera is on for this conversation",
-        "say stop watching me",
-        "heads up",
-    )
-    return any(marker in t for marker in markers)
+    return any(p.search(t) for p in _ONBOARDING_ECHO_PATTERNS)
 
 
 async def _emit_onboarding_name_retry(
@@ -1341,6 +1372,18 @@ async def _emit_onboarding_name_retry(
     reason: str,
 ) -> None:
     """Retry the name prompt without handing the turn to the LLM."""
+    sess.onboarding_retries += 1
+    if sess.onboarding_retries > _ONBOARDING_NAME_MAX_RETRIES:
+        sess.asking_name = False
+        logger.info(
+            "onboarding_name_gave_up",
+            user=sess.username,
+            session_id=sess.session_id,
+            reason=reason,
+            retries=sess.onboarding_retries - 1,
+        )
+        return
+
     text = _ONBOARDING_NAME_RETRY
     phase_ms: dict[str, float] = {}
     with _phase("onboarding_name_retry_synth", phase_ms):
@@ -2547,6 +2590,7 @@ async def _handle_wake_event(ws: WebSocket, sess: _Session,
         #    to 24 h per the PRD.
         is_returning = False
         display_name: str | None = None
+        ask_name_after_ready = False
         if face_id:
             is_returning, display_name = await asyncio.to_thread(
                 _lookup_returning_user, face_id,
@@ -2617,10 +2661,16 @@ async def _handle_wake_event(ws: WebSocket, sess: _Session,
                 "prompted": False,
             }
         else:
-            # New user (or unrecognised face). Per the brief, defer the
-            # greeting to the Phase 8 onboarding flow — just signal that
-            # we're ready to take the first turn.
-            outcome = "deferred_new_user"
+            # New user (or unrecognised face) — ask their name here.
+            #
+            # This used to defer to the Phase 8 flow, which only fires the
+            # prompt from a `user_identified` frame carrying an unrecognised
+            # face. Waking by touch or proximity resolves no face at all, so
+            # nothing ever asked: the robot woke, said nothing, and waited —
+            # indistinguishable from broken. Ask on wake instead; the
+            # `prompted` flag below keeps the face path from asking twice.
+            outcome = "prompted_new_user"
+            ask_name_after_ready = True
 
         # 7. Per-session FSM tag → ``listening``.
         _set_session_fsm_state(sess.session_id, "listening")
@@ -2634,6 +2684,21 @@ async def _handle_wake_event(ws: WebSocket, sess: _Session,
             is_returning_user=is_returning,
             display_name=display_name,
         ))
+
+        # 8b. Ask the name only once the robot is listening, so the prompt
+        #     isn't spoken into a mic that hasn't started streaming yet.
+        if ask_name_after_ready:
+            _IDENTIFIED_USERS[sess.session_id] = {
+                "name": None,
+                "recognized": False,
+                "face_visible": bool(face_id),
+                "ts": time.time(),
+                "greeted": True,
+                "prompted": True,
+            }
+            await _emit_onboarding_name_prompt(
+                ws, sess, reason="wake_{0}".format(gate or "unknown"),
+            )
 
     logger.info(
         "wake_event_handled",

@@ -35,6 +35,18 @@ die()  { printf "${RED}✗${NC} %s\n" "$*" >&2; exit 1; }
 
 [ -f .env ] || die ".env not found at $PROJECT_ROOT/.env"
 
+# ─────────── python interpreter ───────────
+# Bare `python` resolves to whatever is first on PATH — on a machine with
+# conda/pyenv that is NOT the project venv, so the server dies at import on
+# a missing dep (structlog, fastapi, agents…). Pin the venv explicitly when
+# it exists; fall back to PATH python for setups that manage envs another way.
+if [ -x "$PROJECT_ROOT/.venv/bin/python" ]; then
+    PY="$PROJECT_ROOT/.venv/bin/python"
+else
+    PY="$(command -v python || command -v python3)"
+    [ -n "$PY" ] || die "no python found on PATH and no .venv at $PROJECT_ROOT/.venv"
+fi
+
 # Read .env into the current shell. set -a auto-exports each var.
 set -a
 # shellcheck disable=SC1091
@@ -57,9 +69,27 @@ esac
 [ -n "${DEEPGRAM_API_KEY:-}" ] && [[ "${DEEPGRAM_API_KEY}" != PASTE_* ]] \
     || warn "DEEPGRAM_API_KEY missing; server will fall back to Whisper."
 [ -n "${NAO_IP:-}" ]            || die "NAO_IP not set in .env"
-[ -n "${NAO_PASSWORD:-}" ]      || die "NAO_PASSWORD not set in .env"
 [ -n "${SERVER_PORT:-}" ]       || SERVER_PORT=5050
 [ -n "${NAO_SHARED_SECRET:-}" ] || warn "NAO_SHARED_SECRET empty (open mode)."
+
+# ─────────── ssh transport ───────────
+# sshpass exists only to feed NAO_PASSWORD to non-interactive ssh/rsync. When
+# key auth is set up (an installed ~/.ssh key + a Host entry), it is redundant
+# — plain ssh authenticates silently. Prefer sshpass when both it and a
+# password are available, else fall back to bare ssh/rsync so the launcher
+# works on machines without Homebrew. BatchMode on the key path turns a
+# missing/rejected key into an immediate error instead of a password prompt
+# that would hang this script forever.
+SSH_OPTS="-o ConnectTimeout=8 -o StrictHostKeyChecking=no"
+if command -v sshpass >/dev/null 2>&1 && [ -n "${NAO_PASSWORD:-}" ]; then
+    ok "ssh auth: sshpass (NAO_PASSWORD from .env)"
+    nao_ssh()   { sshpass -p "$NAO_PASSWORD" ssh $SSH_OPTS "$@"; }
+    nao_rsync() { sshpass -p "$NAO_PASSWORD" rsync "$@"; }
+else
+    ok "ssh auth: ssh key (sshpass not installed)"
+    nao_ssh()   { ssh $SSH_OPTS -o BatchMode=yes "$@"; }
+    nao_rsync() { rsync "$@"; }
+fi
 
 # ─────────── pick transport mode ───────────
 # USE_WS=1 in .env (or `./run.sh ws`) -> FastAPI + WebSocket via uvicorn.
@@ -78,6 +108,7 @@ export WS_HOST WS_PORT
 if [ "$USE_WS" = "1" ]; then
     SERVER_MODE="ws"
     SERVER_BIND_PORT="$WS_PORT"
+    ok "python: $PY"
     ok "transport: FastAPI + WebSocket (uvicorn) on :$WS_PORT  [USE_WS=1]"
 else
     SERVER_MODE="flask"
@@ -128,8 +159,7 @@ do_stop() {
     log "stopping any uvicorn server.app_ws"
     pkill -f "uvicorn .*server\.app_ws" 2>/dev/null || true
     log "stopping main.py on robot"
-    sshpass -p "$NAO_PASSWORD" ssh -o ConnectTimeout=8 -o StrictHostKeyChecking=no \
-        "nao@$NAO_IP" 'pkill -f "python.*main.py" 2>/dev/null; true' || true
+    nao_ssh "nao@$NAO_IP" 'pkill -f "python.*main.py" 2>/dev/null; true' || true
     log "killing any stale local log tails"
     kill_local_tails
     ok "stopped"
@@ -138,16 +168,15 @@ do_stop() {
 # ─────────── deploy NAO files to robot ───────────
 do_deploy() {
     log "deploying nao/ to nao@$NAO_IP:/home/nao/nao_assist/"
-    sshpass -p "$NAO_PASSWORD" rsync -az --delete \
+    nao_rsync -az --delete \
         --exclude='*.pyc' --exclude='__pycache__' --exclude='nao.log' \
         --exclude='.last_user.json' \
-        -e "ssh -o ConnectTimeout=8 -o StrictHostKeyChecking=no" \
+        -e "ssh $SSH_OPTS" \
         "$PROJECT_ROOT/nao/" "nao@$NAO_IP:/home/nao/nao_assist/"
     # Wipe any stale .pyc on the robot — Python 2 prefers cached bytecode
     # over .py source when timestamps look close, which made VAD threshold
     # tweaks silently no-op.
-    sshpass -p "$NAO_PASSWORD" ssh -o ConnectTimeout=8 -o StrictHostKeyChecking=no \
-        "nao@$NAO_IP" 'find /home/nao/nao_assist -name "*.pyc" -delete 2>/dev/null; true'
+    nao_ssh "nao@$NAO_IP" 'find /home/nao/nao_assist -name "*.pyc" -delete 2>/dev/null; true'
     ok "deploy complete (.pyc cleared)"
 }
 
@@ -188,7 +217,7 @@ start_server() {
         # launcher itself is exercised end-to-end up to the import.
         log "starting uvicorn server.app_ws on $WS_HOST:$port (log: $SERVER_LOG)"
         log "cmd: uvicorn server.app_ws:app --host $WS_HOST --port $port --log-level info"
-        nohup python -m uvicorn server.app_ws:app \
+        nohup "$PY" -m uvicorn server.app_ws:app \
             --host "$WS_HOST" --port "$port" --log-level info \
             > "$SERVER_LOG" 2>&1 &
         pid=$!
@@ -196,7 +225,7 @@ start_server() {
         wait_for_health "$port" "$pid" "uvicorn (FastAPI/WS)"
     else
         log "starting Flask on 0.0.0.0:$port (log: $SERVER_LOG)"
-        nohup python -m flask --app server.server run \
+        nohup "$PY" -m flask --app server.server run \
             --host 0.0.0.0 --port "$port" \
             > "$SERVER_LOG" 2>&1 &
         pid=$!
@@ -208,8 +237,7 @@ start_server() {
 # ─────────── launch main.py on robot ───────────
 start_robot() {
     log "killing any stale main.py on robot"
-    sshpass -p "$NAO_PASSWORD" ssh -o ConnectTimeout=8 -o StrictHostKeyChecking=no \
-        "nao@$NAO_IP" 'pkill -f "python.*main.py" 2>/dev/null; sleep 1; true' || true
+    nao_ssh "nao@$NAO_IP" 'pkill -f "python.*main.py" 2>/dev/null; sleep 1; true' || true
 
     log "launching main.py on $NAO_IP (server callback: $LOCAL_IP:$SERVER_BIND_PORT, mode: $SERVER_MODE)"
     # naoqi bindings live at /opt/aldebaran on this NAO image; without
@@ -218,20 +246,21 @@ start_robot() {
     # USE_WS is forwarded so the robot-side main.py can pick the WS client
     # vs the legacy HTTP /turn flow without us redeploying. The same value
     # the local run is using is the value the robot uses — no drift.
-    sshpass -p "$NAO_PASSWORD" ssh -o ConnectTimeout=8 -o StrictHostKeyChecking=no \
-        "nao@$NAO_IP" "PYTHONPATH=/opt/aldebaran/lib/python2.7/site-packages \
+    nao_ssh "nao@$NAO_IP" "PYTHONPATH=/opt/aldebaran/lib/python2.7/site-packages \
 LD_LIBRARY_PATH=/opt/aldebaran/lib:/opt/aldebaran/lib/naoqi \
 SERVER_IP='$LOCAL_IP' SERVER_PORT='$SERVER_BIND_PORT' \
 USE_WS='$USE_WS' \
 NAO_SHARED_SECRET='$NAO_SHARED_SECRET' \
 IMAGE_PER_TURN='${IMAGE_PER_TURN:-1}' \
+MIC_CHANNEL='${MIC_CHANNEL:-left}' \
+ENGAGE_POSTURE='${ENGAGE_POSTURE:-Sit}' \
+SPEAKING_GESTURES='${SPEAKING_GESTURES:-1}' \
 nohup python -u /home/nao/nao_assist/main.py \
 > $ROBOT_LOG_REMOTE 2>&1 </dev/null &"
     sleep 2
     # confirm exactly one process is running
     local count
-    count="$(sshpass -p "$NAO_PASSWORD" ssh -o ConnectTimeout=8 -o StrictHostKeyChecking=no \
-        "nao@$NAO_IP" 'ps aux | grep -v grep | grep -c "python.*main.py"' || echo 0)"
+    count="$(nao_ssh "nao@$NAO_IP" 'ps aux | grep -v grep | grep -c "python.*main.py"' || echo 0)"
     if [ "$count" = "1" ]; then
         ok "main.py running on robot (1 process)"
     else
@@ -325,8 +354,7 @@ do_tail() {
         | awk -v p="$server_prefix" '{ print p $0; fflush(); }' \
         || cat "$SERVER_LOG") &
     SERVER_TAIL_PID=$!
-    sshpass -p "$NAO_PASSWORD" ssh -o ConnectTimeout=8 -o StrictHostKeyChecking=no \
-        "nao@$NAO_IP" "tail -f $ROBOT_LOG_REMOTE" 2>/dev/null \
+    nao_ssh "nao@$NAO_IP" "tail -f $ROBOT_LOG_REMOTE" 2>/dev/null \
         | eval "$_pipeline" \
         | awk -v p="$robot_prefix" '{ print p $0; fflush(); }' &
     ROBOT_TAIL_PID=$!

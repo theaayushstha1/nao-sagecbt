@@ -191,6 +191,27 @@ GATE_TOUCH = "touch"  # head tactile sensor — manual wake bypass
 # ALMemory keys for the three NAO V6 head tactile sensors. Any of them
 # touched fires the touch gate (we don't care which — front/middle/rear
 # all mean "user wants my attention").
+def identity_key_for_face(face):
+    """Return the key the server should identify this face by.
+
+    ALFaceDetection hands back two different things: an internal face id
+    (``extra_info[0]``) that is renumbered on every re-detection, and the
+    recognised name (``extra_info[2]``) that ``learnFace()`` stored. Only the
+    name is stable across sessions, and the server's ``users`` table is keyed
+    on it.
+
+    Sending the numeric id meant the returning-user lookup asked for "18" in
+    a table of names — never matched, so the same person was a brand-new user
+    every session. Prefer the name; fall back to the id for an unrecognised
+    face so it is at least consistent within one session.
+    """
+    face = face or {}
+    name = str(face.get("name") or "").strip()
+    if name:
+        return name
+    return str(face.get("face_id") or "").strip()
+
+
 _HEAD_TOUCH_KEYS = (
     "FrontTactilTouched",
     "MiddleTactilTouched",
@@ -724,7 +745,7 @@ class WakeStateMachine(object):
                 return  # never re-fire on entry to the same state
             self._state = new_state
             face = self._last_face or {}
-            face_id = face.get("face_id") or ""
+            face_id = identity_key_for_face(face)
             confidence = float(face.get("confidence", 0.0) or 0.0)
             distance_m = float(face.get("distance_m", 0.0) or 0.0)
             # Snapshot the visible faces so the multi-person callback

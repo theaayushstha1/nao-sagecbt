@@ -644,11 +644,21 @@ class _SessionController(object):
             self._log.debug("user_identified_early_failed", error=str(exc))
 
     def kick_stand_up(self, reason="engage"):
-        """Stand NAO up without blocking wake/touch handling.
+        """Move NAO to the engagement posture without blocking wake/touch.
 
-        The WS client also stands NAO on first TTS, but touch wake should
+        The WS client also posts NAO on first TTS, but touch wake should
         visibly bring the robot up immediately, even before a reply starts.
+
+        The posture itself is `ENGAGE_POSTURE` (env, default "Sit").
+        Standing holds every joint stiff under load, which drains the
+        battery fast and is loud next to the mic; sitting still gives a
+        visible reaction to touch. Set ENGAGE_POSTURE=Stand to restore the
+        original behavior, or ENGAGE_POSTURE=none to not move at all.
         """
+        posture_name = os.environ.get("ENGAGE_POSTURE", "Sit").strip()
+        if posture_name.lower() == "none":
+            self._log.debug("engage_posture_disabled", reason=reason)
+            return
         def _do_stand():
             if not _HAS_NAOQI or ALProxy is None:
                 return
@@ -661,7 +671,8 @@ class _SessionController(object):
                 except Exception:
                     family = None
                 try:
-                    if family and str(family).lower().startswith("stand"):
+                    if family and str(family).lower().startswith(
+                            posture_name.lower()[:5]):
                         self._log.debug("engage_stand_skipped",
                                         reason=reason,
                                         posture_family=family)
@@ -674,9 +685,11 @@ class _SessionController(object):
                 except Exception:
                     pass
                 self._log.info("engage_stand_start", reason=reason,
-                               posture_family=family)
-                ok = posture.goToPosture("Stand", 0.7)
-                self._log.info("engage_stand_done", reason=reason, ok=ok)
+                               posture_family=family,
+                               posture=posture_name)
+                ok = posture.goToPosture(posture_name, 0.7)
+                self._log.info("engage_stand_done", reason=reason, ok=ok,
+                               posture=posture_name)
             except Exception as exc:
                 self._log.warn("engage_stand_failed", reason=reason,
                                error=str(exc))
