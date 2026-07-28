@@ -57,6 +57,47 @@ _log = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# Loudness
+# ──────────────────────────────────────────────────────────────────────────
+# openai_tts amplifies every clip by OPENAI_TTS_GAIN_DB before handing it to
+# NAO, because raw TTS is far too quiet to carry across a room from the
+# robot's small speakers. This module had no equivalent, so switching the
+# voice over to ElevenLabs silently dropped that boost and NAO became hard
+# to hear. Reuse openai_tts's ffmpeg helper rather than duplicating it --
+# it already fails open, returning the audio unchanged on any ffmpeg error
+# so a CLI hiccup can never make the robot mute.
+#
+# Defaults to the OpenAI gain so both providers sound the same out of the
+# box; set ELEVENLABS_TTS_GAIN_DB to tune this voice independently.
+
+
+def _gain_db() -> float:
+    raw = os.environ.get("ELEVENLABS_TTS_GAIN_DB")
+    if raw is None:
+        raw = os.environ.get("OPENAI_TTS_GAIN_DB", "8")
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _apply_gain(audio: bytes) -> bytes:
+    gain = _gain_db()
+    if not audio or gain <= 0:
+        return audio
+    try:
+        from server.openai_tts import _amplify_mp3
+    except Exception as e:  # noqa: BLE001
+        _log.warning("[elevenlabs_tts] gain helper unavailable: %r", e)
+        return audio
+    try:
+        return _amplify_mp3(audio, gain)
+    except Exception as e:  # noqa: BLE001
+        _log.warning("[elevenlabs_tts] gain failed, sending unamplified: %r", e)
+        return audio
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # Availability
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -140,7 +181,7 @@ def synthesize(text: str,
             return None
         if not chunks:
             return None
-        return b"".join(chunks)
+        return _apply_gain(b"".join(chunks))
 
     # If we're already inside an event loop (the WS handler is async),
     # run on a worker loop via asyncio.run in a thread. This module is

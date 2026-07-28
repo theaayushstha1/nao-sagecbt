@@ -2,11 +2,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from openai import OpenAI
 
-from server import config
-
-_CLIENT = OpenAI(api_key=config.OPENAI_API_KEY)
+from server import config, llm_compat
 
 # Hard-fail keywords — any match returns positive immediately, skip LLM.
 _HARD_KEYWORDS = (
@@ -51,7 +48,10 @@ def crisis_check(text: str) -> CrisisResult:
 
 
 def _llm_classify(text: str) -> bool:
-    resp = _CLIENT.chat.completions.create(
+    # Routed through llm_compat so CRISIS_MODEL can name either provider.
+    # Any exception propagates to crisis_check(), which treats it as a crisis
+    # (failsafe) -- do not add a try/except here that swallows it.
+    out = llm_compat.chat(
         model=config.CRISIS_MODEL,
         messages=[
             {
@@ -68,4 +68,4 @@ def _llm_classify(text: str) -> bool:
         max_tokens=4,
         temperature=0,
     )
-    return resp.choices[0].message.content.strip().upper().startswith("Y")
+    return out.strip().upper().startswith("Y")

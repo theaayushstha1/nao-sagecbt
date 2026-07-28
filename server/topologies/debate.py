@@ -18,6 +18,7 @@ from agents import Runner
 from openai import OpenAI
 
 from server import config
+from server.model_factory import resolve_model
 from server.agents.cbt_coach import cbt_coach_agent
 from server.agents.therapist import build_therapist_agent
 from server.topologies.affect_agent import AffectAgent
@@ -60,7 +61,7 @@ def _judge(user_text: str, reply_a: str, reply_b: str) -> str:
     try:
         client = OpenAI(api_key=config.OPENAI_API_KEY)
         resp = client.chat.completions.create(
-            model=config.ROUTER_MODEL,  # gpt-4o-mini
+            model=resolve_model(config.ROUTER_MODEL),  # gpt-4o-mini
             messages=[
                 {"role": "system", "content": _JUDGE_PROMPT},
                 {

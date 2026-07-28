@@ -255,19 +255,48 @@ def _looks_like_robot_greeting_echo(text: str) -> bool:
     )
 
 
-def _looks_like_hallucination(text: str) -> bool:
-    """True if Whisper output matches a known silence-hallucination pattern."""
+# Phrases in _WHISPER_HALLUCINATIONS that a real person genuinely says to a
+# robot. They are only "hallucinations" when Whisper invents them from silence;
+# with VAD-confirmed speech behind them they are ordinary conversation, and
+# dropping them makes NAO stonewall anyone who opens with "Good morning".
+# NAO's own scripted lines and Whisper's YouTube artifacts ("thanks for
+# watching", "please subscribe", "you") deliberately stay out of this set, and
+# _is_self_echo still guards against NAO hearing its own reply.
+_HUMAN_GREETINGS = frozenset({
+    "good morning", "good afternoon", "good evening",
+    "hello", "hi", "hey", "bye",
+    "ok", "okay", "thanks", "thank you",
+    "how are you doing today",
+})
+
+
+def _looks_like_hallucination(text: str, had_speech: bool = False) -> bool:
+    """True if Whisper output matches a known silence-hallucination pattern.
+
+    `had_speech` means the caller has independent evidence that real speech
+    was present (the WS path's `no_voice` / `silero_no_speech` gates ran and
+    passed). That evidence disarms the short-utterance backstop below, which
+    otherwise eats legitimate one-word turns -- most painfully a bare first
+    name like "Mia", which is a single word of 3 characters.
+    """
     t = (text or "").strip().lower()
     if not t:
         return True
+    nt = _clean_asr_text(t)
+    # Verified speech turns an "invented on silence" phrase back into a real
+    # greeting. Punctuation is already stripped by _clean_asr_text, so this
+    # catches "Good morning." and "Ok." alike.
+    if had_speech and nt in _HUMAN_GREETINGS:
+        return False
     if t in _WHISPER_HALLUCINATIONS:
         return True
-    nt = _clean_asr_text(t)
     if nt in _WHISPER_HALLUCINATIONS or nt in _ASR_NOISE_FRAGMENTS:
         return True
     if _looks_like_robot_greeting_echo(t):
         return True
-    if len(t.split()) <= 1 and len(t) <= 4:
+    # Length-only backstop for callers with no VAD evidence. When speech is
+    # already confirmed upstream, a short word is a short word -- not noise.
+    if not had_speech and len(t.split()) <= 1 and len(t) <= 4:
         return True
     return False
 
@@ -300,15 +329,76 @@ def _is_self_echo(username: str, transcript: str) -> bool:
     return (inter / union) >= 0.6
 
 
+# Latin-script foreign-language detection.
+#
+# `transcribe()` pins language="en", but that is only a hint about the input:
+# measured 2026-07-28, whisper-1, gpt-4o-transcribe and gpt-4o-mini-transcribe
+# all return German text with it set, and whisper-1's verbose_json reports
+# language='english' while doing so. So the API cannot flag this for us.
+#
+# Non-Latin scripts (CJK, Hangul, Cyrillic) already fall out because
+# _clean_asr_text strips them to "". These markers cover Latin-script
+# languages. Every entry must be a word that essentially never appears in
+# spoken English -- no "die"/"man"/"so"/"to", which are German/Polish words
+# but also common English ones.
+_NON_ENGLISH_MARKERS = frozenset({
+    # German
+    "ich", "nicht", "bist", "geht", "dir", "schoen", "schön", "danke",
+    "moechte", "möchte", "guten", "wiedersehen", "gern", "auch", "sehr",
+    "wie geht", "bin hier", "es dir",
+    # Polish
+    "prosze", "proszę", "czesc", "cześć", "dziekuje", "dziękuję", "jestem",
+    "milo", "miło", "slyszec", "słyszeć",
+    # Spanish
+    "hola", "gracias", "estas", "estás", "como estas", "senor", "señor",
+    "buenos", "adios", "adiós",
+    # French
+    "bonjour", "merci", "comment", "ca va", "ça va", "je suis", "oui",
+    "salut", "s'il",
+    # Italian / Portuguese / Romanian
+    "ciao", "grazie", "prego", "obrigado", "ola", "olá", "buna", "bună",
+    "ce mai faci", "multumesc", "mulțumesc",
+})
+
+# Letters that are vanishingly rare in English but routine elsewhere. A
+# transcript carrying these is almost certainly not English. Deliberately
+# excludes bare accented vowels (é, à, ï) so "cafe"/"naive"/"resume" style
+# loanwords and names are unaffected.
+_FOREIGN_CHARS = frozenset("ßäöüąćęłńśźżğıșțñ¿¡")
+
+
+def _looks_non_english(text: str) -> bool:
+    """True when a transcript is almost certainly not English.
+
+    Conservative by design: a false positive silently drops something the
+    user actually said, which is worse than letting one odd phrase through.
+    """
+    raw = (text or "").strip().lower()
+    if not raw:
+        return False
+    if any(ch in _FOREIGN_CHARS for ch in raw):
+        return True
+    nt = _clean_asr_text(raw)
+    if not nt:
+        return False
+    if any(phrase in nt for phrase in _NON_ENGLISH_MARKERS if " " in phrase):
+        return True
+    words = set(nt.split())
+    return bool(words & _NON_ENGLISH_MARKERS)
+
+
 def transcript_reject_reason(username: str, transcript: str,
-                             asking_name: bool = False) -> str | None:
+                             asking_name: bool = False,
+                             had_speech: bool = False) -> str | None:
     if asking_name:
         t = (transcript or "").strip()
         if not t:
             return "hallucination_or_noise"
         return None
-    if _looks_like_hallucination(transcript):
+    if _looks_like_hallucination(transcript, had_speech=had_speech):
         return "hallucination_or_noise"
+    if _looks_non_english(transcript):
+        return "non_english"
     if _is_self_echo(username, transcript):
         return "self_echo"
     if _is_robot_named_echo(transcript):
@@ -355,6 +445,20 @@ def transcribe(path: str) -> str:
         if text:
             return text
         print("[transcribe] deepgram returned empty; falling back to whisper",
+              flush=True)
+    if getattr(config, "USE_ELEVENLABS_STT", False):
+        # Batch REST, not the realtime WS -- keys without the realtime
+        # entitlement 403 on the handshake.
+        from server import elevenlabs_stt
+        text, non_english = elevenlabs_stt.transcribe_rest_detailed(path)
+        if text:
+            return text
+        if non_english:
+            # Scribe is confident this was not English. Whisper would happily
+            # hand the same foreign text back (it ignores our language="en"
+            # hint), so stop here and let the empty transcript be rejected.
+            return ""
+        print("[transcribe] elevenlabs returned empty; falling back to whisper",
               flush=True)
     with open(path, "rb") as f:
         resp = _client.audio.transcriptions.create(

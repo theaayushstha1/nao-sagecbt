@@ -6,6 +6,7 @@ session can reference it.
 """
 from agents import Agent, RunContextWrapper, function_tool
 from server import config, memory
+from server.model_factory import resolve_model
 from server.tools.emotion import identify_distortion, suggest_reframe, log_emotion
 
 
@@ -93,7 +94,7 @@ def build_cbt_coach_agent(username: str) -> Agent:
     return Agent(
         name="cbt_coach",
         instructions=_instructions,
-        model=config.THERAPIST_MODEL,
+        model=resolve_model(config.THERAPIST_MODEL),
         tools=[
             identify_distortion, suggest_reframe, log_emotion,
             cbt_get_step, cbt_set_step, cbt_finish,

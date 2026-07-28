@@ -6,8 +6,12 @@ Reads everything from environment variables.
 
 import os
 
-# NAO connection settings
-NAO_IP   = os.environ.get("NAO_IP", "172.20.95.127")
+# NAO connection settings.
+# This module only ever runs ON the robot, and naoqi listens on the robot's
+# own loopback -- so the default must be 127.0.0.1, never a routable address.
+# A LAN default breaks on every DHCP lease change (and on the Choregraphe
+# autostart after a reboot, which sets no env at all).
+NAO_IP   = os.environ.get("NAO_IP", "127.0.0.1")
 NAO_PORT = int(os.environ.get("NAO_PORT", "9559"))
 
 # OpenAI settings

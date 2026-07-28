@@ -15,6 +15,7 @@ deletion.
 """
 from agents import Agent, ModelSettings
 from server import config
+from server.model_factory import resolve_model
 from server.agents._memory_inject import with_memory_preamble
 
 # Prefer the CS Navigator tool. If the cs-navigator-tool worktree hasn't been
@@ -51,7 +52,7 @@ SYSTEM = (
 chatbot_agent = Agent(
     name="chatbot",
     instructions=with_memory_preamble(SYSTEM),
-    model=config.CHATBOT_MODEL,
+    model=resolve_model(config.CHATBOT_MODEL),
     model_settings=ModelSettings(max_tokens=config.MINI_MAX_TOKENS),
     tools=[_SEARCH_TOOL],
 )

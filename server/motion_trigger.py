@@ -38,6 +38,10 @@ _TRIGGERS: list[tuple[str, dict, str, list[str]]] = [
         "wave hi", "wave hello", "say hi", "say hello", "wave hand",
         "wave at me", "give me a wave", "wave please", "could you wave",
         "can you wave", "just wave",
+        # NOT bare "wave"/"waving" -- test_wave_negative_idiom pins that,
+        # because "a wave of nausea" must not make NAO wave. Only add
+        # phrasings that unambiguously address the robot.
+        "wave your hand", "wave to me", "wave for me", "wave to us",
     ]),
     ("nod_head", {"times": 2}, "*nods*", [
         "nod your head", "nod twice", "nod yes", "give me a nod", "just nod",
@@ -56,9 +60,20 @@ _TRIGGERS: list[tuple[str, dict, str, list[str]]] = [
     ("move_forward", {"meters": 0.3}, "Walking forward.", [
         "step forward", "walk forward", "come forward", "move forward",
         "come closer",
+        # Bare "walk"/"come" phrasings. Without these the turn falls through
+        # to the tool-less fast-chat lane, where NAO answers "I'm all
+        # digital, no legs to move around" -- it denies having a body.
+        "can you walk", "could you walk", "please walk", "walk please",
+        "walk to me", "walk towards me", "walk toward me",
+        "start walking", "keep walking", "let me see you walk",
+        "i want to see you walk", "show me you can walk", "show me a walk",
+        "come here", "come to me", "walk over here",
     ]),
     ("move_backward", {"meters": 0.3}, "Stepping back.", [
         "step back", "walk back", "move back", "step backward", "back up",
+        "can you walk back", "can you walk backward",
+        "can you walk backwards", "walk backward", "walk backwards",
+        "move backward", "move backwards", "go back",
     ]),
     ("turn_left", {"degrees": 45.0}, "Turning left.", [
         "turn left", "rotate left", "look left",
@@ -177,12 +192,21 @@ _TRIGGERS: list[tuple[str, dict, str, list[str]]] = [
 
 # Pre-compile a list of (compiled_regex, action_name, args, ack)
 _COMPILED: list[tuple[re.Pattern, str, dict, str]] = []
-for action, args, ack, phrases in _TRIGGERS:
-    for p in phrases:
-        # Word-boundary match around the phrase. Allows "please stand up now"
-        # to match "stand up" but not "withstand uphill".
-        pattern = re.compile(r"\b" + re.escape(p) + r"\b", re.IGNORECASE)
-        _COMPILED.append((pattern, action, args, ack))
+# Longest phrase first, so the most specific trigger wins regardless of which
+# action declared it. detect() takes the first match, and declaration order
+# alone would send "can you walk back" forward -- move_forward is declared
+# above move_backward, and "can you walk" is a prefix of it.
+_ALL_PHRASES = [
+    (p, action, args, ack)
+    for action, args, ack, phrases in _TRIGGERS
+    for p in phrases
+]
+for p, action, args, ack in sorted(_ALL_PHRASES, key=lambda x: len(x[0]),
+                                   reverse=True):
+    # Word-boundary match around the phrase. Allows "please stand up now"
+    # to match "stand up" but not "withstand uphill".
+    pattern = re.compile(r"\b" + re.escape(p) + r"\b", re.IGNORECASE)
+    _COMPILED.append((pattern, action, args, ack))
 
 _FOLLOW_SOCIAL_RE = re.compile(r"\bfollow\s+me\s+on\b", re.IGNORECASE)
 

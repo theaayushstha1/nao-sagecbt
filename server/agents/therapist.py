@@ -1,6 +1,7 @@
 """Therapist main agent — empathetic, CBT/MI/grounding handoffs, camera consent."""
 from agents import Agent, handoff
 from server import config, memory, memory_rollup as mr, session
+from server.model_factory import resolve_model
 from server.tools.nao_actions import THERAPIST_ACTIONS
 from server.tools.emotion import (
     observe_face, log_emotion, identify_distortion, suggest_reframe,
@@ -215,7 +216,7 @@ def build_therapist_agent(username: str) -> Agent:
     return Agent(
         name="therapist",
         instructions=_instructions,
-        model=config.THERAPIST_MODEL,
+        model=resolve_model(config.THERAPIST_MODEL),
         # Phase 11 / Option B: observe_face removed from the toolset.
         # Vision runs server-side BEFORE the agent and the result is
         # injected into the user message via _build_user_message. This

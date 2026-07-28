@@ -29,12 +29,9 @@ import os
 import time
 from contextlib import contextmanager
 
-from openai import OpenAI
-
 from agents import RunContextWrapper, function_tool
 from server import config, memory, session
-
-_client = OpenAI(api_key=config.OPENAI_API_KEY)
+from server import llm_compat
 
 _log = logging.getLogger(__name__)
 
@@ -126,16 +123,17 @@ def _classify_distortion(thought: str) -> dict:
         "ONE from: " + ", ".join(_DISTORTIONS) + ". Respond as JSON: "
         '{"distortion": "<name>", "explanation": "<one sentence, gentle tone>"}'
     )
-    resp = _client.chat.completions.create(
+    out = llm_compat.chat(
         model=config.CRISIS_MODEL,
         messages=[
             {"role": "system", "content": prompt},
             {"role": "user", "content": thought},
         ],
-        response_format={"type": "json_object"},
+        json_mode=True,
         temperature=0.2,
+        max_tokens=300,
     )
-    return json.loads(resp.choices[0].message.content)
+    return json.loads(out)
 
 
 def _identify_distortion_impl(thought: str) -> dict:
@@ -184,16 +182,17 @@ def _reframe_impl(thought: str, distortion: str) -> list[str]:
         "compassionate alternative thoughts they could consider. Reply as a JSON "
         'list of 2 strings: {"reframes": ["...", "..."]}'
     )
-    resp = _client.chat.completions.create(
+    out = llm_compat.chat(
         model=config.CRISIS_MODEL,
         messages=[
             {"role": "system", "content": prompt},
             {"role": "user", "content": thought},
         ],
-        response_format={"type": "json_object"},
+        json_mode=True,
         temperature=0.4,
+        max_tokens=400,
     )
-    return json.loads(resp.choices[0].message.content)["reframes"]
+    return json.loads(out)["reframes"]
 
 
 @function_tool
@@ -253,7 +252,9 @@ def _vision_classify(image_b64: str) -> dict:
             config.VISION_MODEL, len(image_b64), approx_kb,
         )
 
-    resp = _client.chat.completions.create(
+    # llm_compat converts the image_url data URI into whichever image block
+    # the configured provider expects, so VISION_MODEL can name either.
+    raw = llm_compat.chat(
         model=config.VISION_MODEL,
         messages=[
             {"role": "system", "content": _VISION_SYSTEM},
@@ -266,12 +267,12 @@ def _vision_classify(image_b64: str) -> dict:
                 ],
             },
         ],
-        response_format={"type": "json_object"},
+        json_mode=True,
         temperature=0.2,
+        max_tokens=400,
     )
-    raw = resp.choices[0].message.content
-    finish = getattr(resp.choices[0], "finish_reason", None)
-    refusal = getattr(resp.choices[0].message, "refusal", None)
+    finish = None
+    refusal = None
 
     if _debug_vision_enabled():
         _log.info("[DEBUG_VISION] observe_face response: %s (finish=%s refusal=%s)",
@@ -282,7 +283,7 @@ def _vision_classify(image_b64: str) -> dict:
     # privacy heuristics). One retry with the no-people-detection prompt
     # reliably gets past it.
     if (not raw or not raw.strip()) and refusal is None:
-        retry = _client.chat.completions.create(
+        raw = llm_compat.chat(
             model=config.VISION_MODEL,
             messages=[
                 {"role": "system",
@@ -305,10 +306,10 @@ def _vision_classify(image_b64: str) -> dict:
                      "image_url": {"url": data_uri}},
                  ]},
             ],
-            response_format={"type": "json_object"},
+            json_mode=True,
             temperature=0.2,
+            max_tokens=400,
         )
-        raw = retry.choices[0].message.content
         if _debug_vision_enabled():
             _log.info("[DEBUG_VISION] observe_face retry response: %s", raw)
 

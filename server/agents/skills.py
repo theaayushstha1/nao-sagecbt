@@ -8,6 +8,7 @@ answers.
 """
 from agents import Agent, ModelSettings
 from server import config
+from server.model_factory import resolve_model
 from server.agents._memory_inject import with_memory_preamble
 from server.tools.skills_tools import (
     get_time, get_date, get_weather_baltimore,
@@ -31,7 +32,7 @@ _UTILITY_TOOLS = [
 skills_agent = Agent(
     name="skills",
     instructions=with_memory_preamble(SYSTEM),
-    model=config.SKILLS_MODEL,
+    model=resolve_model(config.SKILLS_MODEL),
     model_settings=ModelSettings(max_tokens=config.NANO_MAX_TOKENS),
     tools=_UTILITY_TOOLS + list(CHAT_ACTIONS),
 )

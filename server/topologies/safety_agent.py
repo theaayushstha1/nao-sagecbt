@@ -138,20 +138,39 @@ def _claude_verdict(payload: str) -> dict:
         logger.warning("SAGE_SAFETY_PROVIDER=claude but ANTHROPIC_API_KEY is empty; falling back to OpenAI")
         return _openai_verdict(payload)
 
-    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
-    msg = client.messages.create(
-        model=config.SAFETY_MODEL_CLAUDE,
-        system=_SYSTEM_PROMPT + "\n\nRespond ONLY with the JSON object — no prose, no backticks.",
-        max_tokens=500,
-        temperature=0,
-        messages=[{"role": "user", "content": payload}],
-    )
+    # Any Anthropic-side failure must fall back, not raise. This is the
+    # crisis gate: it runs before the agent sees the message, on every turn.
+    # An unfunded key, a rate limit, a bad model id or a network blip would
+    # otherwise propagate and take the safety check down entirely. Missing
+    # SDK and empty key are handled above; this covers everything else.
+    try:
+        client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+        msg = client.messages.create(
+            model=config.SAFETY_MODEL_CLAUDE,
+            system=_SYSTEM_PROMPT + "\n\nRespond ONLY with the JSON object — no prose, no backticks.",
+            max_tokens=500,
+            temperature=0,
+            messages=[{"role": "user", "content": payload}],
+        )
+    except Exception as exc:  # noqa: BLE001
+        # NOTE: stdlib logging here, not structlog -- %-args only. Keyword
+        # extras would raise TypeError inside this handler and defeat the
+        # very fallback it exists to provide.
+        logger.warning(
+            "claude safety call failed (model=%s): %r; falling back to OpenAI",
+            config.SAFETY_MODEL_CLAUDE, exc,
+        )
+        return _openai_verdict(payload)
+
     # msg.content is a list of content blocks; the first is usually a TextBlock.
     text = ""
     for block in getattr(msg, "content", []) or []:
         btext = getattr(block, "text", None)
         if btext:
             text += btext
+    if not text.strip():
+        logger.warning("claude safety returned empty content; falling back to OpenAI")
+        return _openai_verdict(payload)
     return _parse_verdict(text)
 
 

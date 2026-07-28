@@ -64,6 +64,74 @@ def _read_wav_pcm(path: str) -> tuple[bytes, int]:
     return frames, rate
 
 
+_REST_URL = "https://api.elevenlabs.io/v1/speech-to-text"
+
+# Scribe reports the language it heard plus a confidence, unlike OpenAI which
+# just echoes back the `language` hint we sent. Above this confidence we trust
+# it and drop the turn rather than answering in a language the speaker never
+# used. Measured: English speech mis-heard as German came back p=0.97.
+_NON_ENGLISH_MIN_PROB = 0.5
+
+
+def transcribe_rest_detailed(path: str,
+                             timeout_s: float = 20.0) -> tuple[str, bool]:
+    """Like `transcribe_rest`, but also reports *why* the text is empty.
+
+    Returns ``(text, non_english)``. The flag lets the caller tell a genuine
+    failure (fall through to another provider) apart from a confidently
+    non-English result (do not fall through -- another provider would just
+    hand the same foreign text back, and Scribe's language confidence is
+    better evidence than any downstream word-list heuristic).
+    """
+    if not is_available():
+        return "", False
+    model = getattr(config, "ELEVENLABS_STT_MODEL", "scribe_v1")
+    if "realtime" in model:
+        model = "scribe_v1"
+    try:
+        import requests  # local import: keeps module import cheap
+        with open(path, "rb") as fh:
+            resp = requests.post(
+                _REST_URL,
+                headers={"xi-api-key": config.ELEVENLABS_API_KEY},
+                files={"file": (os.path.basename(path), fh, "audio/wav")},
+                data={"model_id": model},
+                timeout=timeout_s,
+            )
+        if resp.status_code != 200:
+            _log.warning("EL STT rest %s: %s", resp.status_code,
+                         resp.text[:200])
+            return "", False
+        body = resp.json()
+    except Exception as e:  # noqa: BLE001
+        _log.warning("EL STT rest failed: %r", e)
+        return "", False
+
+    text = (body.get("text") or "").strip()
+    lang = (body.get("language_code") or "").lower()
+    prob = body.get("language_probability")
+    if text and lang and not lang.startswith("en"):
+        if prob is None or prob >= _NON_ENGLISH_MIN_PROB:
+            _log.warning("EL STT non-english (%s p=%s): %r", lang, prob,
+                         text[:80])
+            return "", True
+    return text, False
+
+
+def transcribe_rest(path: str, timeout_s: float = 20.0) -> str:
+    """Transcribe a whole audio file via Scribe's batch REST endpoint.
+
+    Separate from the realtime WS path above for a concrete reason: keys
+    without the realtime entitlement get 403 on the WS handshake while this
+    endpoint works fine (verified 2026-07-28 -- 0.55 s round trip, correct
+    transcript). The WS is lower latency when available; this is what a
+    standard key can actually use.
+
+    Returns "" on any failure so the caller falls through to Whisper.
+    """
+    return transcribe_rest_detailed(path, timeout_s=timeout_s)[0]
+
+
 def transcribe_file(path: str, timeout_s: float = 30.0) -> str:
     """Sync wrapper for the bench harness. Reads a WAV, streams its PCM
     into the EL Scribe Realtime WS, returns the final committed text.

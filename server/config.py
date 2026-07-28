@@ -17,12 +17,21 @@ load_dotenv()
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 ROUTER_MODEL = os.environ.get("ROUTER_MODEL", "gpt-4.1-nano")
 CHAT_MODEL = os.environ.get("CHAT_MODEL", "gpt-4.1-nano")
+# The embodied lane carries the 18 NAO action tools, and tool-calling cost
+# differs sharply by provider -- measured 2026-07-28, the same tool-heavy turn
+# took 7.8s on gpt-4.1-mini and 19.6s on claude-sonnet-5. It gets its own knob
+# so the conversational lane can move to a different provider without dragging
+# the action lane's latency with it. Defaults to CHAT_MODEL when unset.
+CHAT_EMBODIED_MODEL = os.environ.get("CHAT_EMBODIED_MODEL", CHAT_MODEL)
 CHATBOT_MODEL = os.environ.get("CHATBOT_MODEL", "gpt-4.1-mini")
 THERAPIST_MODEL = os.environ.get("THERAPIST_MODEL", "gpt-4.1-mini")
 SKILLS_MODEL = os.environ.get("SKILLS_MODEL", "gpt-4.1-nano")
 CRISIS_MODEL = os.environ.get("CRISIS_MODEL", "gpt-4.1")
-CBT_MODEL = os.environ.get("CBT_MODEL", "gpt-4.1-mini")
-GROUNDING_MODEL = os.environ.get("GROUNDING_MODEL", "gpt-4.1-mini")
+# NOTE: there is deliberately no CBT_MODEL / GROUNDING_MODEL. Both coaches are
+# therapist sub-agents and read THERAPIST_MODEL (cbt_coach.py,
+# grounding_coach.py). Separate vars existed here but nothing consumed them, so
+# setting them looked like it worked and silently did nothing. If those lanes
+# ever need to diverge from the therapist, add the var *and* the read together.
 
 # Per-agent max output tokens. Nano agents are capped tightly to keep replies
 # snappy (under 2 short sentences). Mini agents get a bit more headroom for
@@ -63,6 +72,13 @@ USE_ELEVENLABS_TTS = os.environ.get("USE_ELEVENLABS_TTS", "1") == "1"
 # (sim/stt_ab.py). Production STT path stays on Deepgram + OpenAI
 # Whisper until the bench data says otherwise.
 USE_ELEVENLABS_STT = os.environ.get("USE_ELEVENLABS_STT", "0") == "1"
+# The Scribe *realtime* WS needs an entitlement a standard key lacks -- it
+# 403s on the handshake, once per session, before falling back. The batch
+# REST path in elevenlabs_stt.transcribe_rest works on any key, so leave the
+# WS off unless the plan actually includes it.
+USE_ELEVENLABS_STT_REALTIME = (
+    os.environ.get("USE_ELEVENLABS_STT_REALTIME", "0") == "1"
+)
 ELEVENLABS_STT_MODEL = os.environ.get("ELEVENLABS_STT_MODEL", "scribe_v2_realtime")
 
 # Deepgram Nova-2 streaming/prerecorded ASR. When USE_DEEPGRAM is true and the

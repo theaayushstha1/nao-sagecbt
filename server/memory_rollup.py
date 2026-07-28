@@ -3,12 +3,8 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
-from openai import OpenAI
-
 from server import config, session as s
-
-_client = OpenAI(api_key=config.OPENAI_API_KEY)
-
+from server import llm_compat
 
 def _week_start(d: date | None = None) -> str:
     d = d or date.today()
@@ -23,7 +19,7 @@ def _month_start(d: date | None = None) -> str:
 
 def _summarize_to_theme(recaps: list[str]) -> str:
     joined = "\n- ".join(recaps)
-    resp = _client.chat.completions.create(
+    return llm_compat.chat(
         model=config.CRISIS_MODEL,
         messages=[
             {
@@ -36,13 +32,13 @@ def _summarize_to_theme(recaps: list[str]) -> str:
             {"role": "user", "content": f"- {joined}"},
         ],
         temperature=0.3,
+        max_tokens=300,
     )
-    return resp.choices[0].message.content.strip()
 
 
 def _summarize_to_persona(themes: list[str]) -> str:
     joined = "\n- ".join(themes)
-    resp = _client.chat.completions.create(
+    return llm_compat.chat(
         model=config.CRISIS_MODEL,
         messages=[
             {
@@ -56,8 +52,8 @@ def _summarize_to_persona(themes: list[str]) -> str:
             {"role": "user", "content": f"- {joined}"},
         ],
         temperature=0.4,
+        max_tokens=400,
     )
-    return resp.choices[0].message.content.strip()
 
 
 def _save_theme(username: str, when: datetime, body: str) -> None:

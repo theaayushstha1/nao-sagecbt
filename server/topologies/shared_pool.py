@@ -21,6 +21,7 @@ from agents import Runner
 from openai import OpenAI
 
 from server import config
+from server.model_factory import resolve_model
 from server.agents.cbt_coach import cbt_coach_agent
 from server.agents.grounding_coach import grounding_coach_agent
 from server.agents.therapist import build_therapist_agent
@@ -71,7 +72,7 @@ def _synthesize(user_text: str, t: str, c: str, g: str) -> str:
     try:
         client = OpenAI(api_key=config.OPENAI_API_KEY)
         resp = client.chat.completions.create(
-            model=config.THERAPIST_MODEL,
+            model=resolve_model(config.THERAPIST_MODEL),
             messages=[
                 {"role": "system", "content": "You are a warm, non-clinical CBT companion on a NAO robot for college students. Never diagnose. Validate first."},
                 {"role": "user", "content": _FINAL_SYNTHESIS_TMPL.format(t=t, c=c, g=g, user_text=user_text)},

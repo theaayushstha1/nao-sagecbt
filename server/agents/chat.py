@@ -17,6 +17,7 @@ it now reads the transcript and picks pure vs embodied per-turn.
 """
 from agents import Agent, ModelSettings
 from server import config
+from server.model_factory import resolve_model
 from server.agents._memory_inject import with_memory_preamble
 from server.tools.nao_actions import CHAT_ACTIONS
 
@@ -164,7 +165,9 @@ SYSTEM = (
 chat_embodied_agent = Agent(
     name="chat_embodied",
     instructions=SYSTEM,
-    model=config.CHAT_MODEL,
+    # CHAT_EMBODIED_MODEL, not CHAT_MODEL -- this lane carries the action
+    # tools, where provider choice costs real latency (see config.py).
+    model=resolve_model(config.CHAT_EMBODIED_MODEL),
     model_settings=ModelSettings(max_tokens=config.FAST_CHAT_MAX_TOKENS),
     tools=CHAT_ACTIONS,
 )
@@ -190,13 +193,18 @@ PURE_SYSTEM = (
     "You DO hear the user (their speech is transcribed) and you DO see them "
     "via the camera. NEVER say \"I can't hear\", \"I'm text-only\", \"I "
     "communicate through text\", or anything denying you have ears/eyes — "
-    "you're a physical robot with a mic, camera, and speakers."
+    "you're a physical robot with a mic, camera, and speakers. "
+    "ALWAYS reply in English, even if the transcript you receive is in "
+    "another language. Speech-to-text sometimes mis-detects the language on "
+    "unclear audio; mirroring it strands an English-speaking user. If a "
+    "transcript looks garbled or is not English, say briefly in English that "
+    "you didn't catch that and ask them to repeat."
 )
 
 pure_chat_agent = Agent(
     name="chat",
     instructions=PURE_SYSTEM,
-    model=config.CHAT_MODEL,
+    model=resolve_model(config.CHAT_MODEL),
     # tool_choice="none" turns off tool selection entirely; tools=[]
     # belt-and-braces it. Either alone would be enough; both is cheap.
     model_settings=ModelSettings(

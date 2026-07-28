@@ -26,6 +26,7 @@ from typing import Any
 from openai import OpenAI
 
 from server import config
+from server.model_factory import resolve_model
 from server.tools.emotion import _observe_face_impl
 
 logger = logging.getLogger("sage.affect_agent")
@@ -58,7 +59,7 @@ def _text_sentiment(user_text: str) -> dict:
         return {"valence": 0.0, "arousal": 0.2, "categorical": "neutral"}
     try:
         resp = _openai_client().chat.completions.create(
-            model=config.CRISIS_MODEL,  # gpt-4o-mini by default
+            model=resolve_model(config.CRISIS_MODEL),  # gpt-4o-mini by default
             messages=[
                 {
                     "role": "system",

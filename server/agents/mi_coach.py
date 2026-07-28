@@ -13,6 +13,7 @@ when the user expresses intention to change).
 """
 from agents import Agent
 from server import config, memory
+from server.model_factory import resolve_model
 from server.tools.emotion import log_emotion
 
 
@@ -67,6 +68,6 @@ def build_mi_coach_agent(username: str) -> Agent:
     return Agent(
         name="mi_coach",
         instructions=_instructions,
-        model=config.THERAPIST_MODEL,
+        model=resolve_model(config.THERAPIST_MODEL),
         tools=[log_emotion],
     )

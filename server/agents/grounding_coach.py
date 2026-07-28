@@ -1,6 +1,7 @@
 """Grounding coach — runs one grounding exercise on therapist handoff."""
 from agents import Agent
 from server import config, memory
+from server.model_factory import resolve_model
 from server.tools.emotion import observe_face
 
 _BASE = (
@@ -59,7 +60,7 @@ def build_grounding_coach_agent(username: str) -> Agent:
     return Agent(
         name="grounding_coach",
         instructions=_instructions,
-        model=config.THERAPIST_MODEL,
+        model=resolve_model(config.THERAPIST_MODEL),
         tools=[observe_face],
     )
 

@@ -510,6 +510,11 @@ class NaoWsClient(object):
         # is a no-op if the thread is already running).
         if not self._tts_active.is_set():
             self._tts_active.set()
+        # Same reason, and the one that bites hardest: without tts_started
+        # the mic gate never closed, so NAO recorded its own speech and
+        # transcribed itself into an ask/echo/ask loop. Audio arriving is
+        # the only signal every reply path actually sends.
+        self._close_mic_gate_for_tts()
         try:
             self._kick_stand_up()
         except Exception:
@@ -864,9 +869,24 @@ class NaoWsClient(object):
             self.log.debug("brain_saved")
 
     # --- TTS gating: close mic on start, reopen on end + grace ---
+    def _close_mic_gate_for_tts(self):
+        """Close the mic gate so NAO doesn't record its own speech.
+
+        Called from both `_on_tts_started` and the audio_chunk handler.
+        The server emits `tts_started` from only one of its eight reply
+        paths, so hanging mic safety on that frame alone left the gate
+        open through onboarding TTS — NAO transcribed its own voice and
+        looped. `gate()` is idempotent, so calling this per chunk is safe.
+        """
+        self._cancel_pending_mic_open()
+        try:
+            if self.audio_streamer is not None:
+                self.audio_streamer.gate(True)  # close mic
+        except Exception as exc:
+            self.log.error("mic_gate_close_failed", error=str(exc))
+
     def _on_tts_started(self, data):
         self._tts_active.set()
-        self._cancel_pending_mic_open()
         # Server is now streaming TTS — block any further filler and
         # cut a filler that's mid-utterance.
         self._reply_audio_arrived = True
@@ -880,11 +900,7 @@ class NaoWsClient(object):
             self._announcer_stop_all()
         except Exception:
             pass
-        try:
-            if self.audio_streamer is not None:
-                self.audio_streamer.gate(True)  # close mic
-        except Exception as exc:
-            self.log.error("mic_gate_close_failed", error=str(exc))
+        self._close_mic_gate_for_tts()
         # Posture: stand up before speaking so NAO has presence and the
         # gestures don't look weird from a sitting/crouched stance.
         # Best-effort, non-blocking — fire-and-forget on a daemon thread
@@ -1374,6 +1390,8 @@ class NaoWsClient(object):
         TTS is active. Idempotent — restarting before stop is a
         no-op (so back-to-back tts_started frames don't spawn N threads).
         """
+        if self._speaking_gestures_disabled():
+            return
         if self._speaking_gestures_suppressed():
             return
         if self._speaking_gesture_thread is not None and \
@@ -1394,6 +1412,16 @@ class NaoWsClient(object):
         we don't block here so tts_ended stays snappy.
         """
         self._speaking_gesture_stop.set()
+
+    def _speaking_gestures_disabled(self):
+        """True when speech body-language is turned off outright.
+
+        `_speaking_gestures_suppressed` is a *temporary* window used while an
+        explicit action owns the arms. This is the permanent switch:
+        SPEAKING_GESTURES=0 stops NAO waving while it talks. Default stays on
+        — the gesture loop is deliberate embodiment, not a bug.
+        """
+        return os.environ.get("SPEAKING_GESTURES", "1").strip() == "0"
 
     def _speaking_gestures_suppressed(self):
         try:
